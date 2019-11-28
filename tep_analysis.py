@@ -1,7 +1,7 @@
 ###Stavros Giannoukakos### 
 
 #Version of the program
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import argparse
 from Bio import SeqIO
@@ -10,15 +10,16 @@ import multiprocessing as mp
 from operator import itemgetter
 from multiprocessing import Pool
 import random, shutil, time, glob, csv, sys, os, re
-
+from datetime import datetime
+startTime = datetime.now()
 
 # tep_data =  "/shared/projects/tom_teps_umc"
 tep_data = "/home/stavros/playground/tep_analysis/test_data"
 
-healthy_individuals = "/home/stavros/elba/preprocessed_files/data_info.txt"
+healthy_individuals = "/shared/projects/tom_teps_umc/data_info.txt"
 refTranscGRCh38 = "/home/stavros/references/reference_transcriptome/GRCh38_gencode.v31.transcripts.fa.gz"
 refAnnot = "/home/stavros/references/reference_annotation/GRCh38_gencode.v31.primAssembly_psudo_trna.annotation.gtf"
-customTranscriptome = os.path.join(os.path.dirname(sys.argv[0]), "/cstm_ref/custom_ref_transcriptome.fasta")
+customTranscriptome = os.path.join(os.getcwd(), "custom_ref/custom_ref_transcriptome.fasta")
 
 
 usage = "tep_analysis [options]"
@@ -26,13 +27,16 @@ epilog = " -- January 2019 | Stavros Giannoukakos -- "
 description = "DESCRIPTION"
 
 parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter, usage=usage, description=description, epilog=epilog)
+# Adapter sequence
+parser.add_argument('-a', '--adapter', dest='adapter', default=str("AGATCGGAAGAGC"), metavar='', 
+                	help="Adapter sequence to be trimmed from the input data\nDefault: 'AGATCGGAAGAGC' (TrueSeq)")
 # Number of threads/CPUs to be used
-parser.add_argument('-t', '--threads', dest='threads', default=str(40), metavar='', 
+parser.add_argument('-t', '--threads', dest='threads', default=str(20), metavar='', 
                 	help="Number of threads to be used in the analysis")
 # Number of threads/CPUs to be used
 parser.add_argument('-p', '--partialAssignment', required=False, metavar='', 
                 	help="Multi-mapping reads will partially assigned in the transcripts.\nFor example, if one read is aligned in 2 different transcripts\nit will be counted as 0.5. (Default: full assignemnt)")
-# Display the version of the pipeline 
+# Display the version of the pipeline
 parser.add_argument('-v', '--version', action='version', version='%(prog)s {0}'.format(__version__))
 # Get the options and return them
 args = parser.parse_args()
@@ -41,18 +45,16 @@ args = parser.parse_args()
 current_dir = os.getcwd()
 
 # Main folder hosting the analysis
-analysis_dir = os.path.join(current_dir, "tep_data_analysis")
+analysis_dir = os.path.join(current_dir, "TEST_ANALYSIS2")
 
 # Subfolder 
 reports_dir = os.path.join(analysis_dir, "reports")
-prepr_dir = os.path.join(analysis_dir, "preprocessed_data")  # Save processed fastq files
+preprocessing_dir = os.path.join(analysis_dir, "preprocessed_data")  # Save processed fastq files
 preprocessing_reports_dir = os.path.join(reports_dir, "preprocessing_reports")
-trimming_reports_dir = os.path.join(preprocessing_reports_dir, "trimming_reports")
 alignments_dir = os.path.join(analysis_dir, "alignments") 
 alignment_reports_dir = os.path.join(reports_dir, "alignment_reports")
 expression_analysis_dir = os.path.join(analysis_dir, "expression_analysis")
 var_calling_dir = os.path.join(analysis_dir, "variant_calling")
-
 
 expression_matrix = {}  # Dictionary hosting all expressions
 
@@ -62,40 +64,54 @@ def preprocessing_samples():
 	and  summarise  all 'FastQC' results in once final report called 'summarised_report'. One 
 	can get an overview of the data before the alignment starts. """
 
+	print("\t{0} PREPROCESSING THE INPUT SAMPLES".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
+	
 	### Run Trimgalore with default settings
-	if not os.path.exists(prepr_dir): os.makedirs(prepr_dir)  # Creating necessary directory
-	if not os.path.exists(trimming_reports_dir): os.makedirs(trimming_reports_dir)  # Creating necessary directory
-	print("Preprocessing the input data...")
-	raw_data = [f for f in glob.glob(os.path.join(tep_data, "*.gz"))]
+	if not os.path.exists(preprocessing_dir): os.makedirs(preprocessing_dir)  # Creating necessary directory
+	if not os.path.exists(preprocessing_reports_dir): os.makedirs(preprocessing_reports_dir)  # Creating necessary directory
+		
+	os.chdir(preprocessing_dir)
+	print("{0}  Fastp - Preprocessing the input data...".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
+	raw_data = [f for f in glob.glob(os.path.join(tep_data, "*.gz"))]  ### Obtaining the raw data
+	
 	for i, files in enumerate(raw_data, 1):
 		print("{0}/{1}. Preprocessing {2}".format(i, len(raw_data), os.path.basename(files)))
-		trimGalore = ' '.join([
-		"trim_galore",  # Call Trimgalore to preprocess the raw data
-		"--output_dir", prepr_dir,  # Output directory of processed files
-		" --fastqc_args",  # Input of additional FastQC arguments
-		"\"--threads", args.threads,  # Number of threads to use
-		"--outdir", trimming_reports_dir,"\"",
-		files,  # Output directory of FastQC reports
-		"2>>", os.path.join(trimming_reports_dir, "trimgalore_report.txt")])
-		subprocess.run(trimGalore, shell=True) 
-	
-	### Moving reports to "trimming_reports" directory
-	os.system('mv %s/*_trimming_report.txt %s' %(prepr_dir, trimming_reports_dir))  # Moving trimming reports to qc_reports folder for MultiQC
-	
+		sample_name = os.path.basename(files).split(".")[0]
+		fastp = ' '.join([
+		"fastp",  # Call Fastp to preprocess the raw data
+		"--in1", files,  # Read1 input file name
+		"--out1", os.path.join(preprocessing_dir, '{0}.trimmed.fq.gz'.format(sample_name)),  # Output file
+		"--html", os.path.join(preprocessing_reports_dir, '{0}.fastp.html'.format(sample_name)),  # html format report file name
+		"--json", os.path.join(preprocessing_reports_dir, '{0}.fastp.json'.format(sample_name)),  # json format report file name
+		"--report_title", "\'{0} FastP preprocessing report\'".format(sample_name),  # Title enclosed in the html report
+		"--thread", args.threads,  # Worker thread number
+		"--adapter_sequence", args.adapter,  # Adapter sequence
+		"--trim_poly_x",  # Enable polyX trimming in 3' ends
+		"--n_base_limit 5",  # Discard reads with more than 5 Ns
+		"--average_qual 20",  # Discard reads with average score below 20
+		"--length_required 20",  # Min read length of 20bp
+		"--low_complexity_filter",  # Discard low complexity reads
+		"--compression 6",  # Compression level for gzip output; 1 is fastest - 9 is smallest
+		"2>>", os.path.join(preprocessing_reports_dir, "fastp_report.txt")])
+		subprocess.run(fastp, shell=True) 
+
+
 	### Run MultiQC to summarise the QC reports from all samples into a summary report
+	print("{0}  MultiQC - Summarising the preprocessed data...".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
 	runMultiQC = " ".join([
 	"multiqc",  # Call MultiQC
 	"--quiet",  # Print only log warnings
-	"--outdir", trimming_reports_dir,  # Create report in the FastQC reports directory
+	"--outdir", preprocessing_reports_dir,  # Create report in the FastQC reports directory
 	"--filename", "preliminary_summarised_report",  # Name of the output report 
-	trimming_reports_dir,  # Directory where all FastQC and Cutadapt reports reside
-	"2>>", os.path.join(trimming_reports_dir, "multiQC-report.txt")])  # Output multiQC report
+	preprocessing_reports_dir,  # Directory where all FastQC and Cutadapt reports reside
+	"2>>", os.path.join(preprocessing_reports_dir, "multiQC-report.txt")])  # Output multiQC report
 	subprocess.run(runMultiQC, shell=True)
-	
-	os.system('mv %s/*summarised_report.html %s' %(trimming_reports_dir, preprocessing_reports_dir))  # Moving trimming reports to trimming_reports folder
+
+	### Moving fastp reports "preprocessing_reports" directory
+	os.system('mv {0}/preliminary_summarised_report* {1}'.format(preprocessing_reports_dir, reports_dir))  # Moving trimming reports to qc_reports folder for MultiQC
 	return
 
-def create_cstm_transcriptome(healthy_individuals):
+def create_custom_transcriptome(healthy_individuals):
 	""" To obtain the most abundant transcripts, 'Bowtie2' is aligning 20 random healthy individuals 
 	from the preprocessed data against the reference transcriptome (GENCODE v31). The output SAM files 
 	are getting piped into 'Samtools view' to be converted to sorted BAM format. 'Samtools merge' is
@@ -103,6 +119,8 @@ def create_cstm_transcriptome(healthy_individuals):
 	transcripts of each gene is being  generated. The reference transcriptome and the list of most abundant 
 	transcripts per gene are then being used as a guide to construct a new custom reference transcriptome. 
 	'Bowtie2' is then used to align all samples against the custom transcriptome. """
+
+	print("\n\t{0} GENERATING THE CUSTOM REF. TRANSCRIPTOME".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
 
 	### Creating the directory that will host the analysis
 	temp = os.path.join(analysis_dir, "temp_directory")
@@ -113,8 +131,8 @@ def create_cstm_transcriptome(healthy_individuals):
 	with open(healthy_individuals) as fin:
 		for line in fin:
 			if not line.startswith("!") and line.split()[1] == "Healthy_Control":
-				if str(line.split()[0]+"_trimmed.fq.gz") in os.listdir(prepr_dir):
-					random_healthyIndividuals.append(os.path.join(prepr_dir, line.split()[0]+"_trimmed.fq.gz"))
+				if str(line.split()[0]+".trimmed.fq.gz") in os.listdir(preprocessing_dir):
+					random_healthyIndividuals.append(os.path.join(preprocessing_dir, line.split()[0]+".trimmed.fq.gz"))
 
 	###  Picking up 20 individuals randomly and saving their path to random_healthyIndividuals list
 	if len(random_healthyIndividuals) >= 20:
@@ -122,27 +140,27 @@ def create_cstm_transcriptome(healthy_individuals):
 	else:
 		random_healthyIndividuals = random_healthyIndividuals
 
-	### Calling Bowtie2 to align the preprocessed reads against the reference  transcriptome. Bowtie2 is running with '--very-sensitive-local' parameters
+	### Calling Bowtie2 to align the preprocessed reads against the reference  transcriptome. Bowtie2 is running with '--very-sensitive' parameters
 	if not os.path.exists(alignment_reports_dir): os.makedirs(alignment_reports_dir)
-	print("Bowtie2 - aligning {0} random healthy individuals against the reference transcriptome...".format(len(random_healthyIndividuals)))
+	print("{0}  Bowtie2 - aligning {1} random healthy individuals against the reference transcriptome...".format(datetime.now().strftime("%d.%m.%Y %H:%M"), len(random_healthyIndividuals)))
 	for files in random_healthyIndividuals:
 		bowtie2_cstm = ' '.join([
 		"bowtie2",  # Calling 'Bowtie2' to map against the reference transcriptome (GENCODE v31)
 		"--threads", args.threads,  # Number of threads to be used in Bowtie2 
-		"--very-sensitive-local",  # Parameters of alignment
+		"--very-sensitive",  # Parameters of alignment
 		"-x", os.path.join(os.path.basename(refTranscGRCh38),"bowtie2_GRCh38_gencode.v31.transcripts/GRCh38_gencode.v31.transcripts"),  # Input the transcriptome's indexes
 		"-U", files,  # Input query reads for mapping
   		"|", "samtools sort",  # Calling 'samtools sort' to sort the output alignment file
 		"--threads", args.threads,  # Number of threads to be used by 'samtools sort'
 		"--output-fmt BAM",  # Output in BAM format
-  		"-o", os.path.join(temp, os.path.basename(files).replace("_trimmed.fq.gz", "_trAligned.bam")), "-",  # Sorted output  BAM file
-  		"2>>", os.path.join(alignment_reports_dir, "bt2_cstm_ref-report.txt")])  # Directory where bowtie2 reports reside
+  		"-o", os.path.join(temp, os.path.basename(files).replace(".trimmed.fq.gz", ".trimmed.aligned.bam")), "-",  # Sorted output  BAM file
+  		"2>>", os.path.join(alignment_reports_dir, "bt2_custom_ref-report.txt")])  # Directory where bowtie2 reports reside
 		subprocess.run(bowtie2_cstm, shell=True)
 
 	### Generating a list with the most abundant
 	# Merging all the BAM files generated from the alignment against the reference transcriptome
-	aligned_files = " ".join(glob.glob("{0}/*_trAligned.bam".format(temp)))
-	print("Merging the output BAM files...")
+	aligned_files = " ".join(glob.glob("{0}/*.trimmed.aligned.bam".format(temp)))
+	print("{0}  Merging the output BAM files...".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
 	samtools_merge = " ".join([
 	"samtools merge",  # Calling 'samtools merge' to merge the BAM files - coming from both reference genome and transcriptome
 	"--threads", args.threads,  # Number of additional threads to use
@@ -153,7 +171,7 @@ def create_cstm_transcriptome(healthy_individuals):
 
 	### Obtaining all transcripts along with their counts in order to eventually get the most abundant from each gene
 	transcripts_dict = {}
-	print("Obtaining the most abundant transcript per gene...")
+	print("{0}  Obtaining the most abundant transcript per gene...".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
 	bamfile = pysam.AlignmentFile(os.path.join(temp ,"total_transcripts.bam"))  # Reading the merged BAM file
 	for read in bamfile:
 		ref = bamfile.get_reference_name(read.reference_id)  # Obtaining the reference names from each entry
@@ -173,7 +191,7 @@ def create_cstm_transcriptome(healthy_individuals):
 	###  Creating a dictionary from the reference transcriptome 
 	fasta_transcriptome = SeqIO.to_dict(SeqIO.parse(refTranscGRCh38, "fasta"))
 	### saving the most abundant transcripts to a new file called "custom_ref_transcriptome.fasta"
-	print("Generating the custom reference transcriptome...")
+	print("{0}  Generating the custom reference transcriptome...".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
 	with open(customTranscriptome, "a") as outRef:
 		for gene, transc_n_count in transcripts_dict.items():
 			if len(transc_n_count) == 1:
@@ -193,10 +211,13 @@ def create_cstm_transcriptome(healthy_individuals):
 	shutil.rmtree(temp)
 	return 
 
-def aligning_cstm_transcritome():
+def aligning_custom_transcritome():
+
+	print("\n\t{0} ALIGNING AGAINSTE THE CUSTOM REF. TRANSCRIPTOME".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
+
 	""" Creating Bowtie2's indexes for the custom reference transcriptome. """
 	if not os.path.exists("{0}.1.bt2".format(customTranscriptome[:-6])):
-		print("Building Bowtie2's indexes for the custom reference transcriptome...")
+		print("{0}  Building Bowtie2's indexes for the custom reference transcriptome...".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
 		bowtie2_build = ' '.join([
 		"bowtie2-build",  # Calling 'bowtie2-build' function to construct the necessary for the alignments_dir indexes
 		"--threads", args.threads,  # Number of threads to be used by Bowtie2-built
@@ -208,30 +229,38 @@ def aligning_cstm_transcritome():
 
 	""" Calling Bowtie2 to align the preprocessed reads against the custom reference 
 	transcriptome. Bowtie2 is running with '--very-sensitive-local' parameters. """
-	preprocesed_data = glob.glob("{0}/*trimmed.fq.gz".format(prepr_dir))
+	preprocesed_data = glob.glob("{0}/*trimmed.fq.gz".format(preprocessing_dir))
 	if not os.path.exists(alignments_dir): os.makedirs(alignments_dir)
-	print("Bowtie2 - aligning in total {0} samples against the custom reference transcriptome...".format(len(preprocesed_data)))
-	for files in preprocesed_data:
-		bowtie2_align = ' '.join([
-		"bowtie2",  # Calling 'Bowtie2' to map against the custom reference transcriptome (generated based on GENCODE v29)
-		"--threads", args.threads,  # Number of threads to be used in Bowtie2 
-		"--all",  # report all alignments_dir; very slow, MAPQ not meaningful
-		"--un-gz", os.path.join(alignments_dir, os.path.basename(files).replace("_trimmed", ".unaligned")),  # Write unpaired reads that didn't align in fq.gz format.
-		"--sensitive-local",  # Default parameters of local alignment
-		"-x", customTranscriptome[:-6],  # Input the transcriptome's indexes
-		"-U", files,  # Input query reads for mapping
-  		"|", "samtools sort",  # Calling 'samtools sort' to sort the output alignment file
-		"--threads", args.threads,  # Number of threads to be used by 'samtools sort'
-		"--output-fmt BAM",  # Output in BAM format
-  		"-o", os.path.join(alignments_dir, os.path.basename(files).replace("_trimmed.fq.gz", ".aligned.bam")), "-"])  # Sorted output  BAM file
-		subprocess.run(bowtie2_align, shell=True)
+	print("{0}  Bowtie2 - aligning in total {0} samples against the custom reference transcriptome...".format(datetime.now().strftime("%d.%m.%Y %H:%M"),  len(preprocesed_data)))
+	for i, files in enumerate(preprocesed_data,1):
+		if i == 2:
+			print("Aligning {0}".format(files))
+			bowtie2_align = ' '.join([
+			"bowtie2",  # Calling 'Bowtie2' to map against the custom reference transcriptome (generated based on GENCODE v29)
+			"--threads", args.threads,  # Number of threads to be used in Bowtie2 
+			"--all",  # Report all alignments_dir; very slow, MAPQ not meaningful
+			"--un-gz", os.path.join(alignments_dir, os.path.basename(files).replace("_trimmed", ".unaligned")),  # Write unpaired reads that didn't align in fq.gz format.
+			"--very-sensitive",  # Default parameters of global alignment
+			"-x", customTranscriptome[:-6],  # Input the transcriptome's indexes
+			"-U", files,  # Input query reads for mapping
+			# "-S", os.path.join(alignments_dir, os.path.basename(files).replace("_trimmed.fq.gz", ".aligned.sam"))
+	  		"|", "samtools sort",  # Calling 'samtools sort' to sort the output alignment file
+			"--threads", args.threads,  # Number of threads to be used by 'samtools sort'
+			"--output-fmt BAM",  # Output in BAM format
+	  		"-o", os.path.join(alignments_dir, os.path.basename(files).replace("_trimmed.fq.gz", ".aligned.bam")), "-"
+	  		])  # Sorted output  BAM file
+			subprocess.run(bowtie2_align, shell=True)
+	
 	### Generating basic mapping stats
 	mapping_quality_control()
 	return
 
 def mapping_quality_control():
+
+	print("\n\t{0} GENERATING ALIGNMENT STATS".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
+
 	### EXPORTING ALIGNMENT STATS
-	print(">>> RSeQC and Picard - Generating alignment stats: in progress ..")
+	print("{0}  RSeQC and Picard - Generating alignment stats: in progress ..".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
 	aligned_data = glob.glob("{0}/*.aligned.bam".format(alignments_dir))
 	for file in aligned_data:
 		file_name = os.path.basename(file).split(".")[0]
@@ -259,7 +288,7 @@ def mapping_quality_control():
 		"2>>", os.path.join(alignment_reports_dir, "CollectAlignmentSummaryMetrics-report.txt")])
 		subprocess.run(CollectAlignmentSummaryMetrics, shell=True)
 
-	print(">>> multiQC - Summarising all QC reports: in progress ..")
+	print("{0}  multiQC - Summarising all QC reports: in progress ..".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
 	multiQC = " ".join([
 	"multiqc",  # Call MultiQC
 	"--quiet",  # Print only log warnings
@@ -394,18 +423,6 @@ def variant_detection():
 
 	return
 
-def RNA_editing():
-
-	return
-
-def alternative_splicing():
-
-	return
-
-def novel_transcripts():
-
-	return
-
 def clean_up():
 	## REMOVING UNNECESSARY FILES & REPORTS (reports directory)
 	for path, subdir, folder in os.walk(reports_dir):
@@ -421,25 +438,25 @@ def clean_up():
 def main():
 	
 	# Performing preprocessing of the data if it isn't already being done
-	if len(glob.glob("{0}/*_trimmed.fq.gz".format(prepr_dir))) == 0: 
-		preprocessing_samples()  # Preprocessing the raw reads
+	# if len(glob.glob("{0}/*_trimmed.fq.gz".format(preprocessing_dir))) == 0: 
+	preprocessing_samples()  # Preprocessing the raw reads
 
-	# Generating the custom reference transcriptome, if not already done
-	if not os.path.exists(customTranscriptome):
-		create_cstm_transcriptome(healthy_individuals)
+	# # Generating the custom reference transcriptome, if not already done
+	# if not os.path.exists(customTranscriptome):
+	# 	create_custom_transcriptome(healthy_individuals)
 
-	# Aligning all samples against the custom ref. transcriptome
-	aligning_cstm_transcritome():
-
-	# Generating the expression matrix of all samples aligned against the custom ref. transcriptome
-	arg = [file for file in glob.glob("{0}/*.aligned.bam".format(alignments_dir))]
-	pool = mp.Pool(processes=int(args.threads))
-	pool.map(expression_analysis, arg)
-	pool.close()
-
-	generate_expression_matirx()
-
-	# variant_detection()
-	# RNA_editing()
+	# # Aligning all samples against the custom ref. transcriptome
+	# aligning_custom_transcritome()
 	
+	# # # Generating the expression matrix of all samples aligned against the custom ref. transcriptome
+	# # arg = [file for file in glob.glob("{0}/*.aligned.bam".format(alignments_dir))]
+	# # pool = mp.Pool(processes=int(args.threads))
+	# # pool.map(expression_analysis, arg)
+	# # pool.close()
+
+	# # generate_expression_matirx()
+
+	# # variant_detection()
+	# # RNA_editing()
+	print('The pipeline finisded after {0}'.format(datetime.now() - startTime))
 if __name__ == "__main__": main()
